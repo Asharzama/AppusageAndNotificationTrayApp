@@ -268,6 +268,140 @@ namespace AppUsageAndNotification.CommandExecution
             }
         }
 
+        public async Task EnsureAppInstallerServiceAsync()
+        {
+            try
+            {
+                // Check if service exists
+                var checkPsi = new ProcessStartInfo
+                {
+                    FileName = "sc.exe",
+                    Arguments = "query AppInstallerService",
+                    UseShellExecute = false,
+                    CreateNoWindow = true,
+                    RedirectStandardOutput = true
+                };
+
+                using var check = Process.Start(checkPsi);
+                var output = await check!.StandardOutput.ReadToEndAsync();
+                await check.WaitForExitAsync();
+
+                if (output.Contains("AppInstallerService"))
+                {
+                    Debug.WriteLine("✅ AppInstallerService already exists.");
+                    return;
+                }
+
+                // Install the service
+                Debug.WriteLine("📦 Installing AppInstallerService...");
+                await InstallAppInstallerServiceAsync();
+            }
+            catch (Exception ex)
+            {
+                await _apiService.LogErrorAsync("EnsureAppInstallerServiceAsync", ex.Message);
+            }
+        }
+
+        private async Task InstallAppInstallerServiceAsync()
+        {
+            string? tempScriptPath = null;
+            try
+            {
+                tempScriptPath = Path.Combine(
+                    Path.GetTempPath(),
+                    $"{Guid.NewGuid()}_InstallService.ps1");
+
+                await File.WriteAllTextAsync(tempScriptPath,
+                    GetServiceInstallScript(), System.Text.Encoding.UTF8);
+
+                var psi = new ProcessStartInfo
+                {
+                    FileName = "powershell.exe",
+                    Arguments = $"-ExecutionPolicy Bypass -NonInteractive " +
+                               $"-WindowStyle Hidden -File \"{tempScriptPath}\"",
+                    UseShellExecute = false,
+                    CreateNoWindow = true,
+                    RedirectStandardOutput = true,
+                    RedirectStandardError = true
+                };
+
+                using var process = new Process { StartInfo = psi };
+                process.Start();
+                await process.WaitForExitAsync();
+
+                Debug.WriteLine("✅ AppInstallerService installed.");
+            }
+            catch (Exception ex)
+            {
+                await _apiService.LogErrorAsync("InstallAppInstallerServiceAsync", ex.Message);
+            }
+            finally
+            {
+                if (!string.IsNullOrWhiteSpace(tempScriptPath) && File.Exists(tempScriptPath))
+                    File.Delete(tempScriptPath);
+            }
+        }
+
+        private static string GetServiceInstallScript()
+        {
+            var lines = new[]
+            {
+        "# Create required folders",
+        "$watchFolder = 'C:\\AppInstaller\\Jobs'",
+        "$logFolder   = 'C:\\AppInstaller\\Logs'",
+        "$scriptDir   = 'C:\\AppInstaller'",
+        "",
+        "foreach ($f in @($watchFolder, $logFolder, $scriptDir)) {",
+        "    if (!(Test-Path $f)) { New-Item -Path $f -ItemType Directory -Force | Out-Null }",
+        "}",
+        "",
+        "# Grant everyone write access to Jobs and Logs folders",
+        "icacls $watchFolder /grant 'Everyone:(OI)(CI)F' /T /Q | Out-Null",
+        "icacls $logFolder   /grant 'Everyone:(OI)(CI)F' /T /Q | Out-Null",
+        "",
+        "# Write the service worker script",
+        "$workerScript = @'",
+        "while ($true) {",
+        "    $jobs = Get-ChildItem 'C:\\AppInstaller\\Jobs\\*.json' -ErrorAction SilentlyContinue",
+        "    foreach ($job in $jobs) {",
+        "        try {",
+        "            $data    = Get-Content $job.FullName | ConvertFrom-Json",
+        "            $appName = $data.AppName",
+        "            $logFile = \"C:\\AppInstaller\\Logs\\$($job.BaseName).log\"",
+        "            Remove-Item $job.FullName -Force",
+        "            Add-Content $logFile \"[$(Get-Date)] Starting install: $appName\"",
+        "            $result = winget install --name $appName --silent --accept-package-agreements --accept-source-agreements --disable-interactivity --force 2>&1",
+        "            Add-Content $logFile $result",
+        "            if ($LASTEXITCODE -eq 0) {",
+        "                Add-Content $logFile \"SUCCESS: $appName installed\"",
+        "            } else {",
+        "                Add-Content $logFile \"ERROR: $appName failed (exit=$LASTEXITCODE)\"",
+        "            }",
+        "        } catch {",
+        "            Add-Content 'C:\\AppInstaller\\Logs\\service_error.log' \"$_\"",
+        "        }",
+        "    }",
+        "    Start-Sleep 5",
+        "}",
+        "'@",
+        "$workerScript | Set-Content 'C:\\AppInstaller\\Worker.ps1' -Encoding UTF8",
+        "",
+        "# Create and start service using NSSM or sc.exe",
+        "$svcName = 'AppInstallerService'",
+        "$existing = Get-Service $svcName -ErrorAction SilentlyContinue",
+        "if (-not $existing) {",
+        "    sc.exe create $svcName binPath= \"powershell.exe -NonInteractive -ExecutionPolicy Bypass -File C:\\AppInstaller\\Worker.ps1\" start= auto obj= LocalSystem DisplayName= 'App Installer Service'",
+        "    sc.exe description $svcName 'Installs apps submitted by child users'",
+        "    sc.exe start $svcName",
+        "    Write-Host 'Service created and started'",
+        "} else {",
+        "    Write-Host 'Service already exists'",
+        "}",
+    };
+
+            return string.Join(Environment.NewLine, lines);
+        }
+
         private static string GetInstallScript()
         {
             var lines = new[]
@@ -276,23 +410,103 @@ namespace AppUsageAndNotification.CommandExecution
         "    [Parameter(Mandatory=$true)]",
         "    [string]$AppName",
         ")",
+        "",
+        "$WatchFolder = 'C:\\AppInstaller\\Jobs'",
+        "$LogFolder   = 'C:\\AppInstaller\\Logs'",
+        "",
         "$ConfirmPreference     = 'None'",
         "$ErrorActionPreference = 'Continue'",
         "$ProgressPreference    = 'SilentlyContinue'",
         "",
-        "$LogDir  = \"$env:LOCALAPPDATA\\Safe4Sure\\Logs\"",
-        "$LogFile = \"$LogDir\\Install_${AppName}_$(Get-Date -Format 'yyyyMMdd_HHmmss').log\"",
-        "if (!(Test-Path $LogDir)) { New-Item -Path $LogDir -ItemType Directory -Force | Out-Null }",
+        "$UserLogDir  = \"$env:LOCALAPPDATA\\Safe4Sure\\Logs\"",
+        "$UserLogFile = \"$UserLogDir\\Install_${AppName}_$(Get-Date -Format 'yyyyMMdd_HHmmss').log\"",
+        "if (!(Test-Path $UserLogDir)) { New-Item -Path $UserLogDir -ItemType Directory -Force | Out-Null }",
         "",
         "function Write-Log {",
         "    param([string]$Message, [string]$Level = 'INFO')",
         "    $line = \"[$(Get-Date -Format 'yyyy-MM-dd HH:mm:ss')] [$Level] $Message\"",
-        "    Add-Content -Path $LogFile -Value $line -ErrorAction SilentlyContinue",
+        "    Add-Content -Path $UserLogFile -Value $line -ErrorAction SilentlyContinue",
         "    Write-Host $line",
         "}",
         "",
         "Write-Log \"=== INSTALL START === App: $AppName\"",
         "Write-Log \"User: $env:USERNAME\"",
+        "",
+        "# ============================================================",
+        "# CHECK SERVICE",
+        "# ============================================================",
+        "$svc = Get-Service 'AppInstallerService' -ErrorAction SilentlyContinue",
+        "if ($svc -and $svc.Status -eq 'Running') {",
+        "    Write-Log \"AppInstallerService found and running — submitting job...\"",
+        "",
+        "    # Create folders if missing",
+        "    if (!(Test-Path $WatchFolder)) { New-Item -Path $WatchFolder -ItemType Directory -Force | Out-Null }",
+        "    if (!(Test-Path $LogFolder))   { New-Item -Path $LogFolder   -ItemType Directory -Force | Out-Null }",
+        "",
+        "    $jobId   = \"$AppName-$(Get-Date -Format 'yyyyMMdd-HHmmss')\"",
+        "    $jobFile = \"$WatchFolder\\$jobId.json\"",
+        "    $logFile = \"$LogFolder\\$jobId.log\"",
+        "",
+        "    $job = @{ AppName = $AppName } | ConvertTo-Json",
+        "    try {",
+        "        Set-Content $jobFile $job -Encoding UTF8",
+        "        Write-Log \"Job submitted: $jobFile\"",
+        "    } catch {",
+        "        Write-Log \"Could not write job file: $_\" \"ERROR\"",
+        "        Write-Log \"Falling back to direct install...\" \"WARN\"",
+        "        goto DirectInstall",
+        "    }",
+        "",
+        "    # Wait for service to pick up",
+        "    $timeout = 30",
+        "    $waited  = 0",
+        "    Write-Log \"Waiting for service to pick up job...\"",
+        "    while (!(Test-Path $logFile) -and $waited -lt $timeout) {",
+        "        Start-Sleep 1",
+        "        $waited++",
+        "    }",
+        "",
+        "    if (!(Test-Path $logFile)) {",
+        "        Write-Log \"Service did not respond in $timeout sec — falling back to direct install\" \"WARN\"",
+        "    } else {",
+        "        # Stream log until done",
+        "        $lastLine = 0",
+        "        $maxWait  = 300",
+        "        $elapsed  = 0",
+        "        $done     = $false",
+        "        $exitCode = 0",
+        "",
+        "        while (-not $done -and $elapsed -lt $maxWait) {",
+        "            if (Test-Path $logFile) {",
+        "                $lines = Get-Content $logFile -ErrorAction SilentlyContinue",
+        "                if ($lines) {",
+        "                    for ($i = $lastLine; $i -lt $lines.Count; $i++) {",
+        "                        Write-Log $lines[$i]",
+        "                        if ($lines[$i] -match 'SUCCESS:') { $done = $true; $exitCode = 0 }",
+        "                        if ($lines[$i] -match 'ERROR:')   { $done = $true; $exitCode = 1 }",
+        "                    }",
+        "                    $lastLine = $lines.Count",
+        "                }",
+        "            }",
+        "            if (-not $done) { Start-Sleep 2; $elapsed += 2 }",
+        "        }",
+        "",
+        "        if ($exitCode -eq 0) {",
+        "            Write-Log \"SUCCESS: Installed via AppInstallerService\" \"SUCCESS\"",
+        "            Write-Log \"=== INSTALL COMPLETE === Log: $UserLogFile\" \"SUCCESS\"",
+        "            exit 0",
+        "        } else {",
+        "            Write-Log \"Service install failed — falling back to direct install\" \"WARN\"",
+        "        }",
+        "    }",
+        "} else {",
+        "    Write-Log \"AppInstallerService not found or not running — using direct install\" \"WARN\"",
+        "}",
+        "",
+        "# ============================================================",
+        "# DIRECT INSTALL (fallback when service not available)",
+        "# ============================================================",
+        "Write-Log \"=== DIRECT INSTALL ===\"",
         "",
         "# STEP 1: Winget",
         "Write-Log \"STEP 1: Trying Winget...\"",
@@ -345,18 +559,18 @@ namespace AppUsageAndNotification.CommandExecution
         "            }",
         "            if ($LASTEXITCODE -eq 0) {",
         "                Write-Log \"SUCCESS: Installed via Winget\" \"SUCCESS\"",
-        "                Write-Log \"=== INSTALL COMPLETE === Log: $LogFile\" \"SUCCESS\"",
+        "                Write-Log \"=== INSTALL COMPLETE === Log: $UserLogFile\" \"SUCCESS\"",
         "                exit 0",
         "            } else {",
         "                Write-Log \"Winget ID failed (exit=$LASTEXITCODE)\" \"WARN\"",
         "            }",
         "        }",
         "",
-        "        Write-Log \"Trying direct name install (no scope)...\"",
+        "        Write-Log \"Trying direct name install...\"",
         "        winget install --name $AppName --silent --accept-package-agreements --accept-source-agreements --disable-interactivity --force",
         "        if ($LASTEXITCODE -eq 0) {",
         "            Write-Log \"SUCCESS: Winget direct\" \"SUCCESS\"",
-        "            Write-Log \"=== INSTALL COMPLETE === Log: $LogFile\" \"SUCCESS\"",
+        "            Write-Log \"=== INSTALL COMPLETE === Log: $UserLogFile\" \"SUCCESS\"",
         "            exit 0",
         "        } else {",
         "            Write-Log \"Winget direct failed (exit=$LASTEXITCODE)\" \"WARN\"",
@@ -375,7 +589,7 @@ namespace AppUsageAndNotification.CommandExecution
         "    if (-not (Get-Command scoop -ErrorAction SilentlyContinue)) {",
         "        Write-Log \"Installing Scoop...\"",
         "        Set-ExecutionPolicy RemoteSigned -Scope CurrentUser -Force",
-        "        $env:SCOOP       = \"$env:USERPROFILE\\scoop\"",
+        "        $env:SCOOP        = \"$env:USERPROFILE\\scoop\"",
         "        $env:SCOOP_GLOBAL = \"$env:USERPROFILE\\scoop\\global\"",
         "        $env:SCOOP_CACHE  = \"$env:USERPROFILE\\scoop\\cache\"",
         "        $scoopInstall = Invoke-RestMethod get.scoop.sh",
@@ -389,13 +603,13 @@ namespace AppUsageAndNotification.CommandExecution
         "        scoop install $AppName 2>&1",
         "        if ($LASTEXITCODE -eq 0) {",
         "            Write-Log \"SUCCESS: Scoop\" \"SUCCESS\"",
-        "            Write-Log \"=== INSTALL COMPLETE === Log: $LogFile\" \"SUCCESS\"",
+        "            Write-Log \"=== INSTALL COMPLETE === Log: $UserLogFile\" \"SUCCESS\"",
         "            exit 0",
         "        } else {",
         "            scoop install extras/$AppName 2>&1",
         "            if ($LASTEXITCODE -eq 0) {",
         "                Write-Log \"SUCCESS: Scoop extras\" \"SUCCESS\"",
-        "                Write-Log \"=== INSTALL COMPLETE === Log: $LogFile\" \"SUCCESS\"",
+        "                Write-Log \"=== INSTALL COMPLETE === Log: $UserLogFile\" \"SUCCESS\"",
         "                exit 0",
         "            }",
         "            Write-Log \"Scoop failed (exit=$LASTEXITCODE)\" \"WARN\"",
@@ -414,7 +628,7 @@ namespace AppUsageAndNotification.CommandExecution
         "        winget install --name $AppName --source msstore --silent --accept-package-agreements --accept-source-agreements --disable-interactivity",
         "        if ($LASTEXITCODE -eq 0) {",
         "            Write-Log \"SUCCESS: MS Store\" \"SUCCESS\"",
-        "            Write-Log \"=== INSTALL COMPLETE === Log: $LogFile\" \"SUCCESS\"",
+        "            Write-Log \"=== INSTALL COMPLETE === Log: $UserLogFile\" \"SUCCESS\"",
         "            exit 0",
         "        }",
         "    }",
@@ -423,7 +637,7 @@ namespace AppUsageAndNotification.CommandExecution
         "}",
         "",
         "Write-Log \"ERROR: All methods failed\" \"ERROR\"",
-        "Write-Log \"=== INSTALL FAILED === Log: $LogFile\" \"ERROR\"",
+        "Write-Log \"=== INSTALL FAILED === Log: $UserLogFile\" \"ERROR\"",
         "exit 1",
     };
 

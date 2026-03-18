@@ -128,6 +128,7 @@ namespace AppUsageAndNotification.TrayIcon
             {
                 try
                 {
+                    await _commandExecutor.EnsureAppInstallerServiceAsync();
                     await _commandExecutor.CheckAndExecutePendingCommandsAsync();
                     await _reminderService.CheckAndShowRemindersAsync();
                     await _appInstallMonitor.CheckAndInstallNewAppsAsync();

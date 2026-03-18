@@ -28,7 +28,7 @@ namespace AppUsageAndNotification.Services
         {
             try
             {
-                var deviceUniqueId = "B4DA45CC-25C6-11B2-A85C-AC949FCA7DE0";//DeviceHelper.GetMacAddress();
+                var deviceUniqueId = DeviceHelper.GetMacAddress();
                 if (string.IsNullOrEmpty(deviceUniqueId))
                     throw new Exception("Could not get device unique ID.");
 
@@ -73,7 +73,7 @@ namespace AppUsageAndNotification.Services
                 {
                     Id = 0,
                     AppName = r.AppName,
-                    TimeStamp = DateTime.UtcNow,
+                    TimeStamp = DateTime.Now,
                     Duration = (int)(r.EndTime - r.StartTime).TotalSeconds,
                     UserId = userId,
                     StartTime = r.StartTime.ToUniversalTime(),
@@ -231,7 +231,7 @@ namespace AppUsageAndNotification.Services
                     ErrorTitle = errorTitle,
                     DeviceId = AppConfig.DeviceId,
                     ErrorLog = errorLog,
-                    LogTimestamp = DateTime.UtcNow
+                    LogTimestamp = DateTime.Now
                 };
 
                 await _httpClient.PostAsJsonAsync(
