@@ -21,8 +21,6 @@ namespace AppUsageAndNotification.Services
         private static readonly string InstallCacheFile =
             Path.Combine(CacheDir, "installed_apps_cache.txt");
 
-        private static readonly string UninstallCacheFile =
-            Path.Combine(CacheDir, "uninstalled_apps_cache.txt");
 
         public AppInstallMonitorService(
             ApiService apiService,
@@ -59,7 +57,7 @@ namespace AppUsageAndNotification.Services
 
                 var latestApps = await _apiService
                     .GetInstalledAppListAsync(AppConfig.UserId);
-
+                var masterApps = await _apiService.GetMasterAppListAsync();
                 if (latestApps.Count == 0) return;
 
                 var cachedApps = LoadCache(InstallCacheFile);
@@ -75,19 +73,64 @@ namespace AppUsageAndNotification.Services
 
                 Debug.WriteLine($"🆕 New apps: {string.Join(", ", newApps)}");
 
+
                 foreach (var appName in newApps)
                 {
-                    var success = await _commandExecutor
-                        .ExecuteInstallScriptPublicAsync(appName);
+                    string packageId = string.Empty;
+                    string? installParams = null;
 
-                    await _apiService.LogErrorAsync(
-                        success ? "App Installed" : "App Install Failed",
-                        success
-                            ? $"Installed: {appName}"
-                            : $"Failed: {appName}");
+                    var masterApp = masterApps.FirstOrDefault(m =>
+                        m.AppName.Equals(appName, StringComparison.OrdinalIgnoreCase));
+
+                    if (masterApp != null)
+                    {
+                        // ✅ Use packageId from master list
+                        packageId = masterApp.PackageId;
+
+                        // ✅ Extract install params from metadata if available
+                        //if (!string.IsNullOrWhiteSpace(masterApp.MetaData))
+                        //{
+                        //    try
+                        //    {
+                        //        var meta = System.Text.Json.JsonSerializer
+                        //            .Deserialize<AppMetaData>(masterApp.MetaData,
+                        //                new System.Text.Json.JsonSerializerOptions
+                        //                {
+                        //                    PropertyNameCaseInsensitive = true
+                        //                });
+
+                        //        installParams = meta?.Install?.Params;
+
+                        //        Debug.WriteLine($"📋 MetaData params: {installParams}");
+                        //    }
+                        //    catch (Exception ex)
+                        //    {
+                        //        Debug.WriteLine($"⚠️ MetaData parse failed: {ex.Message}");
+                        //    }
+                        //}
+
+                        Debug.WriteLine($"📦 Master app found: {appName} " +
+                                       $"→ packageId={packageId}, params={installParams}");
+                        var success = await _commandExecutor
+                        .ExecuteInstallScriptPublicAsync(packageId, installParams);
+
+                        await _apiService.LogErrorAsync(
+                            success ? "App Installed" : "App Install Failed",
+                            success
+                                ? $"Installed: {appName} (packageId={packageId})"
+                                : $"Failed: {appName} (packageId={packageId})");
+
+                        if(success) SaveCache(InstallCacheFile, latestApps);
+                    }
+                    else
+                    {
+                        Debug.WriteLine($"📦 No master app found for: {appName} " +
+                                       $"— using appName as packageId");
+                    }
+
+                    
                 }
 
-                SaveCache(InstallCacheFile, latestApps);
             }
             catch (Exception ex)
             {
@@ -96,57 +139,6 @@ namespace AppUsageAndNotification.Services
             }
         }
 
-        public async Task CheckAndUninstallAppsAsync()
-        {
-            try
-            {
-                if (!AppConfig.IsReady) return;
-
-                var appsToUninstall = await _apiService
-                    .GetUninstalledAppListAsync(AppConfig.UserId);
-
-                if (appsToUninstall.Count == 0)
-                {
-                    Debug.WriteLine("✅ No apps to uninstall.");
-                    return;
-                }
-
-                var cachedUninstalls = LoadCache(UninstallCacheFile);
-                var newUninstalls = appsToUninstall
-                    .Except(cachedUninstalls, StringComparer.OrdinalIgnoreCase)
-                    .ToList();
-
-                if (newUninstalls.Count == 0)
-                {
-                    Debug.WriteLine("✅ No new uninstalls needed.");
-                    return;
-                }
-
-                Debug.WriteLine($"🗑️ Uninstalling: {string.Join(", ", newUninstalls)}");
-
-                foreach (var appName in newUninstalls)
-                {
-                    var success = await _commandExecutor
-                        .ExecuteUninstallScriptPublicAsync(appName);
-
-                    await _apiService.LogErrorAsync(
-                        success ? "App Uninstalled" : "App Uninstall Failed",
-                        success
-                            ? $"Uninstalled: {appName}"
-                            : $"Failed: {appName}");
-                }
-
-                var allProcessed = cachedUninstalls
-                    .Union(newUninstalls, StringComparer.OrdinalIgnoreCase)
-                    .ToList();
-                SaveCache(UninstallCacheFile, allProcessed);
-            }
-            catch (Exception ex)
-            {
-                await _apiService.LogErrorAsync(
-                    "CheckAndUninstallAppsAsync", ex.Message);
-            }
-        }
 
         private static List<string> LoadCache(string filePath)
         {

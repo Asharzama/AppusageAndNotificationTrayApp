@@ -28,7 +28,7 @@ namespace AppUsageAndNotification.Services
         {
             try
             {
-                var deviceUniqueId = DeviceHelper.GetMacAddress();
+                var deviceUniqueId = "B4DA45CC-25C6-11B2-A85C-AC949FCA7DE0";//DeviceHelper.GetMacAddress();
                 if (string.IsNullOrEmpty(deviceUniqueId))
                     throw new Exception("Could not get device unique ID.");
 
@@ -219,6 +219,24 @@ namespace AppUsageAndNotification.Services
                 return new List<string>();
             }
         }
+        public async Task<List<MasterApplicationDetail>> GetMasterAppListAsync()
+        {
+            try
+            {
+                var url = $"{BaseUrl}/api/MasterApplicationDetails";
+                var response = await _httpClient
+                    .GetFromJsonAsync<ApiResponseModel<List<MasterApplicationDetail>>>(url);
+
+                return response?.IsSucced == true
+                    ? response.Result ?? new List<MasterApplicationDetail>()
+                    : new List<MasterApplicationDetail>();
+            }
+            catch (Exception ex)
+            {
+                await LogErrorAsync("GetMasterAppListAsync", ex.Message);
+                return new List<MasterApplicationDetail>();
+            }
+        }
 
         // ── Error Logging ────────────────────────────────────────────
         public async Task LogErrorAsync(string errorTitle, string errorLog)
@@ -381,5 +399,31 @@ namespace AppUsageAndNotification.Services
 
         [JsonPropertyName("logTimestamp")]
         public DateTime LogTimestamp { get; set; }
+    }
+    public class MasterApplicationDetail
+    {
+        [JsonPropertyName("id")]
+        public int Id { get; set; }
+
+        [JsonPropertyName("appName")]
+        public string AppName { get; set; } = "";
+
+        [JsonPropertyName("displayName")]
+        public string DisplayName { get; set; } = "";
+
+        [JsonPropertyName("source")]
+        public string Source { get; set; } = "";
+
+        [JsonPropertyName("packageId")]
+        public string PackageId { get; set; } = "";
+
+        [JsonPropertyName("installerType")]
+        public string InstallerType { get; set; } = "";
+
+        [JsonPropertyName("installType")]
+        public string InstallType { get; set; } = "";
+
+        [JsonPropertyName("metaData")]
+        public string MetaData { get; set; } = "";
     }
 }

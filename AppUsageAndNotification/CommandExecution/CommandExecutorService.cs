@@ -1,6 +1,8 @@
 ﻿using AppUsageAndNotification.Services;
+using Microsoft.VisualBasic.Devices;
 using System;
 using System.Diagnostics;
+using System.Diagnostics.Metrics;
 using System.IO;
 using System.Net.Http;
 using System.Runtime.InteropServices;
@@ -200,39 +202,90 @@ namespace AppUsageAndNotification.CommandExecution
             }
         }
 
-        private async Task<bool> ExecuteInstallScriptAsync(string? appName)
+        private async Task<bool> ExecuteInstallScriptAsync(
+    string? packageId, string? installParams = null)
         {
             string? tempScriptPath = null;
             try
             {
-                if (string.IsNullOrWhiteSpace(appName))
+                if (string.IsNullOrWhiteSpace(packageId))
                 {
-                    await _apiService.LogErrorAsync("Install Failed", "AppName is missing.");
+                    await _apiService.LogErrorAsync("Install Failed", "PackageId is missing.");
                     return false;
                 }
 
                 tempScriptPath = Path.Combine(
-                    Path.GetTempPath(), $"{Guid.NewGuid()}_InstallApp.ps1");
+                    Path.GetTempPath(),
+                    $"{Guid.NewGuid()}_InstallApp.ps1");
 
-                // ✅ Use method instead of const
-                await File.WriteAllTextAsync(tempScriptPath,
-                    GetInstallScript(), System.Text.Encoding.UTF8);
+                await File.WriteAllTextAsync(
+                    tempScriptPath,
+                    GetInstallScript(),
+                    System.Text.Encoding.UTF8);
 
-                Debug.WriteLine($"📦 Installing: {appName}");
-                return await RunScriptWithParamsInActiveSession(tempScriptPath, appName);
+                Debug.WriteLine($"📦 Installing: {packageId} with params: {installParams}");
+
+                // ✅ Build arguments — include Params only if available
+                var arguments = $"-ExecutionPolicy Bypass -NonInteractive " +
+                               $"-WindowStyle Hidden " +
+                               $"-File \"{tempScriptPath}\" " +
+                               $"-AppName \"{packageId}\"";
+
+                if (!string.IsNullOrWhiteSpace(installParams))
+                    arguments += $" -Params \"{installParams}\"";
+
+                var psi = new ProcessStartInfo
+                {
+                    FileName = "powershell.exe",
+                    Arguments = arguments,
+                    UseShellExecute = false,
+                    CreateNoWindow = true,
+                    RedirectStandardOutput = true,
+                    RedirectStandardError = true
+                };
+
+                using var process = new Process { StartInfo = psi };
+                process.Start();
+
+                var output = await process.StandardOutput.ReadToEndAsync();
+                var error = await process.StandardError.ReadToEndAsync();
+
+                var completed = await Task.Run(
+                    () => process.WaitForExit(10 * 60 * 1000));
+
+                if (!completed)
+                {
+                    process.Kill();
+                    await _apiService.LogErrorAsync("Install Timeout",
+                        $"{packageId} timed out.");
+                    return false;
+                }
+
+                if (!string.IsNullOrWhiteSpace(output))
+                    Debug.WriteLine($"📤 Output: {output}");
+                if (!string.IsNullOrWhiteSpace(error))
+                    Debug.WriteLine($"⚠️ Error: {error}");
+
+                return process.ExitCode == 0;
             }
             catch (Exception ex)
             {
                 await _apiService.LogErrorAsync("ExecuteInstallScriptAsync",
-                    $"{appName}: {ex.Message}");
+                    $"{packageId}: {ex.Message}");
                 return false;
             }
             finally
             {
-                if (!string.IsNullOrWhiteSpace(tempScriptPath) && File.Exists(tempScriptPath))
+                if (!string.IsNullOrWhiteSpace(tempScriptPath) &&
+                    File.Exists(tempScriptPath))
                     File.Delete(tempScriptPath);
             }
         }
+
+
+        public async Task<bool> ExecuteInstallScriptPublicAsync(
+    string packageId, string? installParams = null)
+    => await ExecuteInstallScriptAsync(packageId, installParams);
 
         private async Task<bool> ExecuteUninstallScriptAsync(string? appName)
         {
@@ -248,12 +301,8 @@ namespace AppUsageAndNotification.CommandExecution
                 tempScriptPath = Path.Combine(
                     Path.GetTempPath(), $"{Guid.NewGuid()}_UninstallApp.ps1");
 
-                // ✅ Use method instead of const
-                await File.WriteAllTextAsync(tempScriptPath,
-                    GetUninstallScript(), System.Text.Encoding.UTF8);
-
-                Debug.WriteLine($"🗑️ Uninstalling: {appName}");
-                return await RunScriptWithParamsInActiveSession(tempScriptPath, appName);
+                return true;
+ 
             }
             catch (Exception ex)
             {
@@ -268,697 +317,6 @@ namespace AppUsageAndNotification.CommandExecution
             }
         }
 
-        public async Task EnsureAppInstallerServiceAsync()
-        {
-            try
-            {
-                // Check if service exists
-                var checkPsi = new ProcessStartInfo
-                {
-                    FileName = "sc.exe",
-                    Arguments = "query AppInstallerService",
-                    UseShellExecute = false,
-                    CreateNoWindow = true,
-                    RedirectStandardOutput = true
-                };
-
-                using var check = Process.Start(checkPsi);
-                var output = await check!.StandardOutput.ReadToEndAsync();
-                await check.WaitForExitAsync();
-
-                if (output.Contains("AppInstallerService"))
-                {
-                    Debug.WriteLine("✅ AppInstallerService already exists.");
-                    return;
-                }
-
-                // Install the service
-                Debug.WriteLine("📦 Installing AppInstallerService...");
-                await InstallAppInstallerServiceAsync();
-            }
-            catch (Exception ex)
-            {
-                await _apiService.LogErrorAsync("EnsureAppInstallerServiceAsync", ex.Message);
-            }
-        }
-
-        private async Task InstallAppInstallerServiceAsync()
-        {
-            string? tempScriptPath = null;
-            try
-            {
-                tempScriptPath = Path.Combine(
-                    Path.GetTempPath(),
-                    $"{Guid.NewGuid()}_InstallService.ps1");
-
-                await File.WriteAllTextAsync(tempScriptPath,
-                    GetServiceInstallScript(), System.Text.Encoding.UTF8);
-
-                var psi = new ProcessStartInfo
-                {
-                    FileName = "powershell.exe",
-                    Arguments = $"-ExecutionPolicy Bypass -NonInteractive " +
-                               $"-WindowStyle Hidden -File \"{tempScriptPath}\"",
-                    UseShellExecute = false,
-                    CreateNoWindow = true,
-                    RedirectStandardOutput = true,
-                    RedirectStandardError = true
-                };
-
-                using var process = new Process { StartInfo = psi };
-                process.Start();
-                await process.WaitForExitAsync();
-
-                Debug.WriteLine("✅ AppInstallerService installed.");
-            }
-            catch (Exception ex)
-            {
-                await _apiService.LogErrorAsync("InstallAppInstallerServiceAsync", ex.Message);
-            }
-            finally
-            {
-                if (!string.IsNullOrWhiteSpace(tempScriptPath) && File.Exists(tempScriptPath))
-                    File.Delete(tempScriptPath);
-            }
-        }
-
-        private static string GetServiceInstallScript()
-        {
-            var lines = new[]
-            {
-        "# Create required folders",
-        "$watchFolder = 'C:\\AppInstaller\\Jobs'",
-        "$logFolder   = 'C:\\AppInstaller\\Logs'",
-        "$scriptDir   = 'C:\\AppInstaller'",
-        "",
-        "foreach ($f in @($watchFolder, $logFolder, $scriptDir)) {",
-        "    if (!(Test-Path $f)) { New-Item -Path $f -ItemType Directory -Force | Out-Null }",
-        "}",
-        "",
-        "# Grant everyone write access to Jobs and Logs folders",
-        "icacls $watchFolder /grant 'Everyone:(OI)(CI)F' /T /Q | Out-Null",
-        "icacls $logFolder   /grant 'Everyone:(OI)(CI)F' /T /Q | Out-Null",
-        "",
-        "# Write the service worker script",
-        "$workerScript = @'",
-        "while ($true) {",
-        "    $jobs = Get-ChildItem 'C:\\AppInstaller\\Jobs\\*.json' -ErrorAction SilentlyContinue",
-        "    foreach ($job in $jobs) {",
-        "        try {",
-        "            $data    = Get-Content $job.FullName | ConvertFrom-Json",
-        "            $appName = $data.AppName",
-        "            $logFile = \"C:\\AppInstaller\\Logs\\$($job.BaseName).log\"",
-        "            Remove-Item $job.FullName -Force",
-        "            Add-Content $logFile \"[$(Get-Date)] Starting install: $appName\"",
-        "            $result = winget install --name $appName --silent --accept-package-agreements --accept-source-agreements --disable-interactivity --force 2>&1",
-        "            Add-Content $logFile $result",
-        "            if ($LASTEXITCODE -eq 0) {",
-        "                Add-Content $logFile \"SUCCESS: $appName installed\"",
-        "            } else {",
-        "                Add-Content $logFile \"ERROR: $appName failed (exit=$LASTEXITCODE)\"",
-        "            }",
-        "        } catch {",
-        "            Add-Content 'C:\\AppInstaller\\Logs\\service_error.log' \"$_\"",
-        "        }",
-        "    }",
-        "    Start-Sleep 5",
-        "}",
-        "'@",
-        "$workerScript | Set-Content 'C:\\AppInstaller\\Worker.ps1' -Encoding UTF8",
-        "",
-        "# Create and start service using NSSM or sc.exe",
-        "$svcName = 'AppInstallerService'",
-        "$existing = Get-Service $svcName -ErrorAction SilentlyContinue",
-        "if (-not $existing) {",
-        "    sc.exe create $svcName binPath= \"powershell.exe -NonInteractive -ExecutionPolicy Bypass -File C:\\AppInstaller\\Worker.ps1\" start= auto obj= LocalSystem DisplayName= 'App Installer Service'",
-        "    sc.exe description $svcName 'Installs apps submitted by child users'",
-        "    sc.exe start $svcName",
-        "    Write-Host 'Service created and started'",
-        "} else {",
-        "    Write-Host 'Service already exists'",
-        "}",
-    };
-
-            return string.Join(Environment.NewLine, lines);
-        }
-
-        private static string GetInstallScript()
-        {
-            var lines = new[]
-            {
-        "param(",
-        "    [Parameter(Mandatory=$true)]",
-        "    [string]$AppName",
-        ")",
-        "",
-        "$WatchFolder = 'C:\\AppInstaller\\Jobs'",
-        "$LogFolder   = 'C:\\AppInstaller\\Logs'",
-        "",
-        "$ConfirmPreference     = 'None'",
-        "$ErrorActionPreference = 'Continue'",
-        "$ProgressPreference    = 'SilentlyContinue'",
-        "",
-        "$UserLogDir  = \"$env:LOCALAPPDATA\\Safe4Sure\\Logs\"",
-        "$UserLogFile = \"$UserLogDir\\Install_${AppName}_$(Get-Date -Format 'yyyyMMdd_HHmmss').log\"",
-        "if (!(Test-Path $UserLogDir)) { New-Item -Path $UserLogDir -ItemType Directory -Force | Out-Null }",
-        "",
-        "function Write-Log {",
-        "    param([string]$Message, [string]$Level = 'INFO')",
-        "    $line = \"[$(Get-Date -Format 'yyyy-MM-dd HH:mm:ss')] [$Level] $Message\"",
-        "    Add-Content -Path $UserLogFile -Value $line -ErrorAction SilentlyContinue",
-        "    Write-Host $line",
-        "}",
-        "",
-        "Write-Log \"=== INSTALL START === App: $AppName\"",
-        "Write-Log \"User: $env:USERNAME\"",
-        "",
-        "# ============================================================",
-        "# CHECK SERVICE",
-        "# ============================================================",
-        "$svc = Get-Service 'AppInstallerService' -ErrorAction SilentlyContinue",
-        "if ($svc -and $svc.Status -eq 'Running') {",
-        "    Write-Log \"AppInstallerService found and running — submitting job...\"",
-        "",
-        "    # Create folders if missing",
-        "    if (!(Test-Path $WatchFolder)) { New-Item -Path $WatchFolder -ItemType Directory -Force | Out-Null }",
-        "    if (!(Test-Path $LogFolder))   { New-Item -Path $LogFolder   -ItemType Directory -Force | Out-Null }",
-        "",
-        "    $jobId   = \"$AppName-$(Get-Date -Format 'yyyyMMdd-HHmmss')\"",
-        "    $jobFile = \"$WatchFolder\\$jobId.json\"",
-        "    $logFile = \"$LogFolder\\$jobId.log\"",
-        "",
-        "    $job = @{ AppName = $AppName } | ConvertTo-Json",
-        "    try {",
-        "        Set-Content $jobFile $job -Encoding UTF8",
-        "        Write-Log \"Job submitted: $jobFile\"",
-        "    } catch {",
-        "        Write-Log \"Could not write job file: $_\" \"ERROR\"",
-        "        Write-Log \"Falling back to direct install...\" \"WARN\"",
-        "        goto DirectInstall",
-        "    }",
-        "",
-        "    # Wait for service to pick up",
-        "    $timeout = 30",
-        "    $waited  = 0",
-        "    Write-Log \"Waiting for service to pick up job...\"",
-        "    while (!(Test-Path $logFile) -and $waited -lt $timeout) {",
-        "        Start-Sleep 1",
-        "        $waited++",
-        "    }",
-        "",
-        "    if (!(Test-Path $logFile)) {",
-        "        Write-Log \"Service did not respond in $timeout sec — falling back to direct install\" \"WARN\"",
-        "    } else {",
-        "        # Stream log until done",
-        "        $lastLine = 0",
-        "        $maxWait  = 300",
-        "        $elapsed  = 0",
-        "        $done     = $false",
-        "        $exitCode = 0",
-        "",
-        "        while (-not $done -and $elapsed -lt $maxWait) {",
-        "            if (Test-Path $logFile) {",
-        "                $lines = Get-Content $logFile -ErrorAction SilentlyContinue",
-        "                if ($lines) {",
-        "                    for ($i = $lastLine; $i -lt $lines.Count; $i++) {",
-        "                        Write-Log $lines[$i]",
-        "                        if ($lines[$i] -match 'SUCCESS:') { $done = $true; $exitCode = 0 }",
-        "                        if ($lines[$i] -match 'ERROR:')   { $done = $true; $exitCode = 1 }",
-        "                    }",
-        "                    $lastLine = $lines.Count",
-        "                }",
-        "            }",
-        "            if (-not $done) { Start-Sleep 2; $elapsed += 2 }",
-        "        }",
-        "",
-        "        if ($exitCode -eq 0) {",
-        "            Write-Log \"SUCCESS: Installed via AppInstallerService\" \"SUCCESS\"",
-        "            Write-Log \"=== INSTALL COMPLETE === Log: $UserLogFile\" \"SUCCESS\"",
-        "            exit 0",
-        "        } else {",
-        "            Write-Log \"Service install failed — falling back to direct install\" \"WARN\"",
-        "        }",
-        "    }",
-        "} else {",
-        "    Write-Log \"AppInstallerService not found or not running — using direct install\" \"WARN\"",
-        "}",
-        "",
-        "# ============================================================",
-        "# DIRECT INSTALL (fallback when service not available)",
-        "# ============================================================",
-        "Write-Log \"=== DIRECT INSTALL ===\"",
-        "",
-        "# STEP 1: Winget",
-        "Write-Log \"STEP 1: Trying Winget...\"",
-        "try {",
-        "    if (Get-Command winget -ErrorAction SilentlyContinue) {",
-        "        Write-Log \"Winget found\"",
-        "        $productId  = $null",
-        "        $sourceHint = $null",
-        "",
-        "        $searchOut = winget search $AppName --accept-source-agreements --disable-interactivity 2>&1",
-        "        foreach ($line in $searchOut) {",
-        "            if ($line -match 'msstore') {",
-        "                $tokens = $line -split '\\s{2,}'",
-        "                if ($tokens.Count -ge 2) {",
-        "                    $productId  = $tokens[1].Trim()",
-        "                    $sourceHint = 'msstore'",
-        "                    Write-Log \"Found MS Store ID: $productId\"",
-        "                    break",
-        "                }",
-        "            }",
-        "        }",
-        "",
-        "        if (-not $productId) {",
-        "            $showOut = winget show $AppName --accept-source-agreements --disable-interactivity 2>&1",
-        "            foreach ($line in $showOut) {",
-        "                if ($line -match '\\[(.*?)\\]') {",
-        "                    $productId  = $Matches[1]",
-        "                    $sourceHint = 'winget'",
-        "                    Write-Log \"Found Winget ID: $productId\"",
-        "                    break",
-        "                }",
-        "            }",
-        "        }",
-        "",
-        "        if ($productId) {",
-        "            if ($sourceHint -eq 'msstore') {",
-        "                Write-Log \"Installing from MS Store: $productId\"",
-        "                winget install --id $productId --source msstore --silent --accept-package-agreements --accept-source-agreements --disable-interactivity --force",
-        "            } else {",
-        "                Write-Log \"Installing via Winget (user scope): $productId\"",
-        "                winget install --id $productId --scope user --silent --accept-package-agreements --accept-source-agreements --disable-interactivity --force",
-        "                if ($LASTEXITCODE -ne 0) {",
-        "                    Write-Log \"User scope failed - trying without scope...\" \"WARN\"",
-        "                    winget install --id $productId --silent --accept-package-agreements --accept-source-agreements --disable-interactivity --force",
-        "                }",
-        "                if ($LASTEXITCODE -ne 0) {",
-        "                    Write-Log \"Trying machine scope...\" \"WARN\"",
-        "                    winget install --id $productId --scope machine --silent --accept-package-agreements --accept-source-agreements --disable-interactivity --force",
-        "                }",
-        "            }",
-        "            if ($LASTEXITCODE -eq 0) {",
-        "                Write-Log \"SUCCESS: Installed via Winget\" \"SUCCESS\"",
-        "                Write-Log \"=== INSTALL COMPLETE === Log: $UserLogFile\" \"SUCCESS\"",
-        "                exit 0",
-        "            } else {",
-        "                Write-Log \"Winget ID failed (exit=$LASTEXITCODE)\" \"WARN\"",
-        "            }",
-        "        }",
-        "",
-        "        Write-Log \"Trying direct name install...\"",
-        "        winget install --name $AppName --silent --accept-package-agreements --accept-source-agreements --disable-interactivity --force",
-        "        if ($LASTEXITCODE -eq 0) {",
-        "            Write-Log \"SUCCESS: Winget direct\" \"SUCCESS\"",
-        "            Write-Log \"=== INSTALL COMPLETE === Log: $UserLogFile\" \"SUCCESS\"",
-        "            exit 0",
-        "        } else {",
-        "            Write-Log \"Winget direct failed (exit=$LASTEXITCODE)\" \"WARN\"",
-        "        }",
-        "    } else {",
-        "        Write-Log \"Winget not found\" \"WARN\"",
-        "    }",
-        "} catch {",
-        "    Write-Log \"STEP 1 error: $_\" \"ERROR\"",
-        "}",
-        "",
-        "# STEP 2: Scoop",
-        "Write-Log \"STEP 2: Trying Scoop...\"",
-        "try {",
-        "    $env:Path += \";$env:USERPROFILE\\scoop\\shims\"",
-        "    if (-not (Get-Command scoop -ErrorAction SilentlyContinue)) {",
-        "        Write-Log \"Installing Scoop...\"",
-        "        Set-ExecutionPolicy RemoteSigned -Scope CurrentUser -Force",
-        "        $env:SCOOP        = \"$env:USERPROFILE\\scoop\"",
-        "        $env:SCOOP_GLOBAL = \"$env:USERPROFILE\\scoop\\global\"",
-        "        $env:SCOOP_CACHE  = \"$env:USERPROFILE\\scoop\\cache\"",
-        "        $scoopInstall = Invoke-RestMethod get.scoop.sh",
-        "        $scoopInstall | Invoke-Expression",
-        "        Start-Sleep 3",
-        "        $env:Path += \";$env:USERPROFILE\\scoop\\shims\"",
-        "    }",
-        "    if (Get-Command scoop -ErrorAction SilentlyContinue) {",
-        "        Write-Log \"Scoop found - installing: $AppName\"",
-        "        scoop bucket add extras 2>&1 | Out-Null",
-        "        scoop install $AppName 2>&1",
-        "        if ($LASTEXITCODE -eq 0) {",
-        "            Write-Log \"SUCCESS: Scoop\" \"SUCCESS\"",
-        "            Write-Log \"=== INSTALL COMPLETE === Log: $UserLogFile\" \"SUCCESS\"",
-        "            exit 0",
-        "        } else {",
-        "            scoop install extras/$AppName 2>&1",
-        "            if ($LASTEXITCODE -eq 0) {",
-        "                Write-Log \"SUCCESS: Scoop extras\" \"SUCCESS\"",
-        "                Write-Log \"=== INSTALL COMPLETE === Log: $UserLogFile\" \"SUCCESS\"",
-        "                exit 0",
-        "            }",
-        "            Write-Log \"Scoop failed (exit=$LASTEXITCODE)\" \"WARN\"",
-        "        }",
-        "    } else {",
-        "        Write-Log \"Scoop not available\" \"WARN\"",
-        "    }",
-        "} catch {",
-        "    Write-Log \"STEP 2 error: $_\" \"ERROR\"",
-        "}",
-        "",
-        "# STEP 3: MS Store direct",
-        "Write-Log \"STEP 3: MS Store direct...\"",
-        "try {",
-        "    if (Get-Command winget -ErrorAction SilentlyContinue) {",
-        "        winget install --name $AppName --source msstore --silent --accept-package-agreements --accept-source-agreements --disable-interactivity",
-        "        if ($LASTEXITCODE -eq 0) {",
-        "            Write-Log \"SUCCESS: MS Store\" \"SUCCESS\"",
-        "            Write-Log \"=== INSTALL COMPLETE === Log: $UserLogFile\" \"SUCCESS\"",
-        "            exit 0",
-        "        }",
-        "    }",
-        "} catch {",
-        "    Write-Log \"STEP 3 error: $_\" \"ERROR\"",
-        "}",
-        "",
-        "Write-Log \"ERROR: All methods failed\" \"ERROR\"",
-        "Write-Log \"=== INSTALL FAILED === Log: $UserLogFile\" \"ERROR\"",
-        "exit 1",
-    };
-
-            return string.Join(Environment.NewLine, lines);
-        }
-
-        private static string GetUninstallScript()
-        {
-            var lines = new[]
-            {
-        "param(",
-        "    [Parameter(Mandatory=$true)]",
-        "    [string]$AppName",
-        ")",
-        "$ConfirmPreference     = 'None'",
-        "$ErrorActionPreference = 'Continue'",
-        "$ProgressPreference    = 'SilentlyContinue'",
-        "",
-        "$LogDir  = \"$env:LOCALAPPDATA\\Safe4Sure\\Logs\"",
-        "$LogFile = \"$LogDir\\Uninstall_$($AppName)_$(Get-Date -Format 'yyyyMMdd_HHmmss').log\"",
-        "if (!(Test-Path $LogDir)) { New-Item -Path $LogDir -ItemType Directory -Force | Out-Null }",
-        "",
-        "function Write-Log {",
-        "    param([string]$Message, [string]$Level = 'INFO')",
-        "    $line = \"[$(Get-Date -Format 'yyyy-MM-dd HH:mm:ss')] [$Level] $Message\"",
-        "    Add-Content -Path $LogFile -Value $line -ErrorAction SilentlyContinue",
-        "    Write-Host $line",
-        "}",
-        "",
-        "Write-Log \"=== UNINSTALL START === App: $AppName\"",
-        "Write-Log \"User: $env:USERNAME\"",
-        "",
-        "# STEP 0: Kill processes",
-        "Write-Log 'STEP 0: Killing processes...'",
-        "try {",
-        "    Get-Process -ErrorAction SilentlyContinue |",
-        "        Where-Object { $_.Name -like \"*$AppName*\" } |",
-        "        ForEach-Object {",
-        "            Stop-Process -Id $_.Id -Force -ErrorAction SilentlyContinue",
-        "            Write-Log \"  Killed: $($_.Name)\" 'SUCCESS'",
-        "        }",
-        "} catch {",
-        "    Write-Log \"STEP 0 error: $_\" 'ERROR'",
-        "}",
-        "",
-        "# STEP 1: Winget",
-        "Write-Log 'STEP 1: Winget uninstall...'",
-        "try {",
-        "    if (Get-Command winget -ErrorAction SilentlyContinue) {",
-        "        winget uninstall --name $AppName --silent --force --disable-interactivity --accept-source-agreements 2>&1 | Out-Null",
-        "        if ($LASTEXITCODE -eq 0) { Write-Log 'SUCCESS: Winget' 'SUCCESS' }",
-        "        else {",
-        "            winget uninstall --id $AppName --silent --force --disable-interactivity --accept-source-agreements 2>&1 | Out-Null",
-        "            if ($LASTEXITCODE -eq 0) { Write-Log 'SUCCESS: Winget --id' 'SUCCESS' }",
-        "            else { Write-Log \"Winget failed (exit=$LASTEXITCODE)\" 'WARN' }",
-        "        }",
-        "    }",
-        "} catch {",
-        "    Write-Log \"STEP 1 error: $_\" 'ERROR'",
-        "}",
-        "",
-        "# STEP 2: AppX",
-        "Write-Log 'STEP 2: AppX removal...'",
-        "try {",
-        "    Get-AppxPackage -ErrorAction SilentlyContinue |",
-        "        Where-Object { $_.Name -like \"*$AppName*\" } |",
-        "        ForEach-Object {",
-        "            try {",
-        "                Remove-AppxPackage -Package $_.PackageFullName -ErrorAction Stop",
-        "                Write-Log \"  Removed: $($_.Name)\" 'SUCCESS'",
-        "            } catch {",
-        "                Write-Log \"  Failed: $_\" 'ERROR'",
-        "            }",
-        "        }",
-        "} catch {",
-        "    Write-Log \"STEP 2 error: $_\" 'ERROR'",
-        "}",
-        "",
-        "# STEP 3: Scoop",
-        "Write-Log 'STEP 3: Scoop uninstall...'",
-        "try {",
-        "    $env:Path += \";$env:USERPROFILE\\scoop\\shims\"",
-        "    if (Get-Command scoop -ErrorAction SilentlyContinue) {",
-        "        scoop uninstall $AppName 2>&1 | Out-Null",
-        "        if ($LASTEXITCODE -eq 0) { Write-Log 'SUCCESS: Scoop' 'SUCCESS' }",
-        "        else { Write-Log \"Scoop failed (exit=$LASTEXITCODE)\" 'WARN' }",
-        "    }",
-        "} catch {",
-        "    Write-Log \"STEP 3 error: $_\" 'ERROR'",
-        "}",
-        "",
-        "# STEP 4: User registry",
-        "Write-Log 'STEP 4: Registry uninstall...'",
-        "try {",
-        "    $regPaths = @(",
-        "        'HKCU:\\SOFTWARE\\Microsoft\\Windows\\CurrentVersion\\Uninstall\\*',",
-        "        'HKCU:\\SOFTWARE\\WOW6432Node\\Microsoft\\Windows\\CurrentVersion\\Uninstall\\*'",
-        "    )",
-        "    foreach ($rp in $regPaths) {",
-        "        if (-not (Test-Path ($rp -replace '\\\\\\*',''))) { continue }",
-        "        Get-ItemProperty $rp -ErrorAction SilentlyContinue |",
-        "            Where-Object { $_.DisplayName -like \"*$AppName*\" } |",
-        "            ForEach-Object {",
-        "                $uStr = $_.QuietUninstallString",
-        "                if (-not $uStr) { $uStr = $_.UninstallString }",
-        "                if (-not $uStr) { return }",
-        "                if ($uStr -match 'msiexec') {",
-        "                    $null = $uStr -match '\\{[A-F0-9\\-]+\\}'",
-        "                    Start-Process 'msiexec.exe' -ArgumentList \"/x $($Matches[0]) /qn /norestart\" -Wait -WindowStyle Hidden",
-        "                    Write-Log \"  MSI done: $($_.DisplayName)\" 'SUCCESS'",
-        "                } else {",
-        "                    $exe = if ($uStr -match '\"') { ($uStr -split '\"')[1] } else { ($uStr -split ' ')[0] }",
-        "                    if (Test-Path $exe -ErrorAction SilentlyContinue) {",
-        "                        Start-Process -FilePath $exe -ArgumentList '/S /silent /verysilent /quiet /norestart' -Wait -WindowStyle Hidden",
-        "                        Write-Log \"  EXE done: $($_.DisplayName)\" 'SUCCESS'",
-        "                    }",
-        "                }",
-        "            }",
-        "    }",
-        "} catch {",
-        "    Write-Log \"STEP 4 error: $_\" 'ERROR'",
-        "}",
-        "",
-        "# STEP 5: Leftover folders",
-        "Write-Log 'STEP 5: Leftover folders...'",
-        "try {",
-        "    @($env:APPDATA, $env:LOCALAPPDATA, \"$env:USERPROFILE\\AppData\\LocalLow\") |",
-        "        Where-Object { $_ -and (Test-Path $_) } |",
-        "        ForEach-Object {",
-        "            Get-ChildItem -Path $_ -Directory -ErrorAction SilentlyContinue |",
-        "                Where-Object { $_.Name -like \"*$AppName*\" } |",
-        "                ForEach-Object {",
-        "                    try {",
-        "                        Remove-Item -Path $_.FullName -Recurse -Force -ErrorAction Stop",
-        "                        Write-Log \"  Deleted: $($_.FullName)\" 'SUCCESS'",
-        "                    } catch {",
-        "                        Write-Log \"  Failed: $_\" 'WARN'",
-        "                    }",
-        "                }",
-        "        }",
-        "} catch {",
-        "    Write-Log \"STEP 5 error: $_\" 'ERROR'",
-        "}",
-        "",
-        "# STEP 6: Shortcuts",
-        "Write-Log 'STEP 6: Shortcuts...'",
-        "try {",
-        "    @(\"$env:USERPROFILE\\Desktop\", \"$env:APPDATA\\Microsoft\\Windows\\Start Menu\\Programs\") |",
-        "        Where-Object { $_ -and (Test-Path $_) } |",
-        "        ForEach-Object {",
-        "            Get-ChildItem -Path $_ -Filter '*.lnk' -Recurse -ErrorAction SilentlyContinue |",
-        "                Where-Object { $_.Name -like \"*$AppName*\" } |",
-        "                ForEach-Object {",
-        "                    try {",
-        "                        Remove-Item -Path $_.FullName -Force -ErrorAction Stop",
-        "                        Write-Log \"  Removed: $($_.FullName)\" 'SUCCESS'",
-        "                    } catch {",
-        "                        Write-Log \"  Failed: $_\" 'WARN'",
-        "                    }",
-        "                }",
-        "        }",
-        "} catch {",
-        "    Write-Log \"STEP 6 error: $_\" 'ERROR'",
-        "}",
-        "",
-        "Write-Log \"=== UNINSTALL COMPLETE === Log: $LogFile\" 'SUCCESS'",
-        "exit 0",
-    };
-
-            return string.Join(Environment.NewLine, lines);
-        }
-
-
-        private async Task<bool> RunScriptWithParamsInActiveSession(
-    string scriptPath, string appName)
-        {
-            IntPtr explorerToken = IntPtr.Zero;
-            IntPtr duplicateToken = IntPtr.Zero;
-
-            try
-            {
-                var command = $"powershell.exe -ExecutionPolicy Bypass " +
-                             $"-NonInteractive -WindowStyle Hidden " +
-                             $"-File \"{scriptPath}\" -AppName \"{appName}\"";
-
-                // ✅ Get token from explorer.exe (runs as child user)
-                var explorerProcess = Process.GetProcessesByName("explorer")
-                    .FirstOrDefault();
-
-                if (explorerProcess == null)
-                {
-                    Debug.WriteLine("⚠️ Explorer not found — elevated fallback.");
-                    return await RunPowerShellElevatedAsync(scriptPath, appName);
-                }
-
-                // ✅ Open explorer's token
-                if (!OpenProcessToken(
-                    explorerProcess.Handle,
-                    MAXIMUM_ALLOWED,
-                    out explorerToken))
-                {
-                    int err = Marshal.GetLastWin32Error();
-                    Debug.WriteLine($"⚠️ OpenProcessToken failed ({err}) — elevated fallback.");
-                    return await RunPowerShellElevatedAsync(scriptPath, appName);
-                }
-
-                // ✅ Duplicate the token
-                if (!DuplicateTokenEx(
-                    explorerToken,
-                    MAXIMUM_ALLOWED,
-                    IntPtr.Zero,
-                    2, // SecurityImpersonation
-                    1, // TokenPrimary
-                    out duplicateToken))
-                {
-                    int err = Marshal.GetLastWin32Error();
-                    Debug.WriteLine($"⚠️ DuplicateTokenEx failed ({err}) — elevated fallback.");
-                    return await RunPowerShellElevatedAsync(scriptPath, appName);
-                }
-
-                var si = new STARTUPINFO
-                {
-                    cb = Marshal.SizeOf<STARTUPINFO>(),
-                    lpDesktop = "winsta0\\default"
-                };
-
-                // ✅ Launch as child user using their token
-                bool created = CreateProcessWithTokenW(
-                    duplicateToken,
-                    0,
-                    null,
-                    command,
-                    0x08000000, 
-                    IntPtr.Zero,
-                    null,
-                    ref si,
-                    out var pi);
-
-                if (created)
-                {
-                    await Task.Run(() =>
-                    {
-                        try
-                        {
-                            var proc = Process.GetProcessById((int)pi.dwProcessId);
-                            proc.WaitForExit(10 * 60 * 1000);
-                        }
-                        catch { }
-                    });
-
-                    CloseHandle(pi.hProcess);
-                    CloseHandle(pi.hThread);
-
-                    Debug.WriteLine($"✅ Script ran as child user: {appName}");
-                    return true;
-                }
-                else
-                {
-                    int err = Marshal.GetLastWin32Error();
-                    Debug.WriteLine($"⚠️ CreateProcessWithTokenW failed ({err}).");
-                    await _apiService.LogErrorAsync(
-                        "CreateProcessWithTokenW Failed",
-                        $"Win32Error: {err} for: {appName}");
-                    return await RunPowerShellElevatedAsync(scriptPath, appName);
-                }
-            }
-            catch (Exception ex)
-            {
-                await _apiService.LogErrorAsync(
-                    "RunScriptWithParamsInActiveSession", ex.Message);
-                return await RunPowerShellElevatedAsync(scriptPath, appName);
-            }
-            finally
-            {
-                if (explorerToken != IntPtr.Zero) CloseHandle(explorerToken);
-                if (duplicateToken != IntPtr.Zero) CloseHandle(duplicateToken);
-            }
-        }
-        private async Task<bool> RunPowerShellElevatedAsync(
-    string scriptPath, string appName)
-        {
-            try
-            {
-                var serviceName = $"S4S_{Guid.NewGuid():N[..8]}";
-                var command = $"powershell.exe -ExecutionPolicy Bypass " +
-                             $"-NonInteractive -WindowStyle Hidden " +
-                             $"-File \"{scriptPath}\" -AppName \"{appName}\"";
-
-                Debug.WriteLine($"🔧 Creating temp service: {serviceName}");
-
-                // 1. Create service running as LocalSystem (has SeImpersonatePrivilege)
-                var create = await RunProcessAsync("sc.exe",
-                    $"create {serviceName} binPath= \"{command}\" " +
-                    $"start= demand obj= LocalSystem");
-
-                if (create != 0)
-                {
-                    Debug.WriteLine($"⚠️ Service create failed ({create}) — direct fallback.");
-                    return await RunDirectPowerShellAsync(scriptPath, appName);
-                }
-
-                // 2. Start service
-                var start = await RunProcessAsync("sc.exe",
-                    $"start {serviceName}");
-
-                // 3. Wait for completion
-                await Task.Delay(TimeSpan.FromMinutes(5));
-
-                // 4. Delete service
-                await RunProcessAsync("sc.exe", $"delete {serviceName}");
-
-                Debug.WriteLine($"✅ Script ran via service: {appName}");
-                return true;
-            }
-            catch (Exception ex)
-            {
-                await _apiService.LogErrorAsync("RunPowerShellElevatedAsync",
-                    ex.Message);
-                return await RunDirectPowerShellAsync(scriptPath, appName);
-            }
-        }
 
         private async Task<int> RunProcessAsync(string fileName, string args)
         {
@@ -985,59 +343,6 @@ namespace AppUsageAndNotification.CommandExecution
                 return -1;
             }
         }
-
-        // ✅ Last resort — direct PowerShell without session handling
-        private async Task<bool> RunDirectPowerShellAsync(
-            string scriptPath, string appName)
-        {
-            try
-            {
-                Debug.WriteLine($"⚠️ Running direct PowerShell for: {appName}");
-
-                var psi = new ProcessStartInfo
-                {
-                    FileName = "powershell.exe",
-                    Arguments = $"-ExecutionPolicy Bypass -NonInteractive " +
-                               $"-WindowStyle Hidden " +
-                               $"-File \"{scriptPath}\" -AppName \"{appName}\"",
-                    UseShellExecute = false,
-                    CreateNoWindow = true,
-                    RedirectStandardOutput = true,
-                    RedirectStandardError = true
-                };
-
-                using var process = new Process { StartInfo = psi };
-                process.Start();
-
-                var output = await process.StandardOutput.ReadToEndAsync();
-                var error = await process.StandardError.ReadToEndAsync();
-
-                var completed = await Task.Run(
-                    () => process.WaitForExit(10 * 60 * 1000));
-
-                if (!completed)
-                {
-                    process.Kill();
-                    await _apiService.LogErrorAsync("Script Timeout",
-                        $"Timed out: {appName}");
-                    return false;
-                }
-
-                if (!string.IsNullOrWhiteSpace(output))
-                    Debug.WriteLine($"📤 Output: {output}");
-                if (!string.IsNullOrWhiteSpace(error))
-                    Debug.WriteLine($"⚠️ Error: {error}");
-
-                return process.ExitCode == 0;
-            }
-            catch (Exception ex)
-            {
-                await _apiService.LogErrorAsync("RunDirectPowerShellAsync",
-                    ex.Message);
-                return false;
-            }
-        }
-        // ─── App Uninstall ────────────────────────────────────────────
 
         // ─── Embedded Uninstall PS1 ───────────────────────────────────
         private static string GetUninstallScriptContent() => @"
@@ -1453,51 +758,47 @@ try {
 Write-Log ""=== UNINSTALL COMPLETE === Log: $LogFile"" 'SUCCESS'
 exit 0
 ";
-        private async Task<bool> RunPowerShellFallbackAsync(
-            string scriptPath, string appName)
-        {
-            try
-            {
-                var psi = new ProcessStartInfo
-                {
-                    FileName = "powershell.exe",
-                    Arguments = $"-ExecutionPolicy Bypass -NonInteractive " +
-                               $"-WindowStyle Hidden -File \"{scriptPath}\" " +
-                               $"-AppName \"{appName}\"",
-                    UseShellExecute = true,
-                    Verb = "runas",
-                    CreateNoWindow = true
-                };
 
-                using var process = new Process { StartInfo = psi };
-                process.Start();
-
-                var completed = await Task.Run(
-                    () => process.WaitForExit(10 * 60 * 1000));
-
-                if (!completed)
-                {
-                    process.Kill();
-                    await _apiService.LogErrorAsync("Install Timeout",
-                        $"Script timed out for: {appName}");
-                    return false;
-                }
-
-                return process.ExitCode == 0;
-            }
-            catch (Exception ex)
-            {
-                await _apiService.LogErrorAsync("RunPowerShellFallbackAsync",
-                    ex.Message);
-                return false;
-            }
-        }
-        public async Task<bool> ExecuteInstallScriptPublicAsync(string appName)
-    => await ExecuteInstallScriptAsync(appName);
-
-        public async Task<bool> ExecuteUninstallScriptPublicAsync(string appName)
-            => await ExecuteUninstallScriptAsync(appName);
         // ─── Embedded PS1 Script ─────────────────────────────────────
+        private static string GetInstallScript()
+        {
+            var lines = new[]
+            {
+        "param(",
+        "    [Parameter(Mandatory=$true)]",
+        "    [string]$AppName,",
+        "    [Parameter(Mandatory=$false)]",
+        "    [string]$Params",
+        ")",
+        "",
+        "if (-not (Get-Command choco -ErrorAction SilentlyContinue)) {",
+        "    Write-Host 'Chocolatey not found. Installing...'",
+        "    Set-ExecutionPolicy Bypass -Scope Process -Force",
+        "    [System.Net.ServicePointManager]::SecurityProtocol = 3072",
+        "    iex ((New-Object System.Net.WebClient).DownloadString('https://community.chocolatey.org/install.ps1'))",
+        "    refreshenv",
+        "}",
+        "",
+        "$installCommand = 'choco install ' + $AppName + ' -y --no-progress --force'",
+        "",
+        "if ($Params -and $Params.Trim() -ne '') {",
+        "    $installCommand += ' --params=' + $Params",
+        "}",
+        "",
+        "Write-Host ('Executing: ' + $installCommand)",
+        "Invoke-Expression $installCommand",
+        "",
+        "if ($LASTEXITCODE -eq 0) {",
+        "    Write-Host ($AppName + ' installed successfully!')",
+        "} else {",
+        "    Write-Host ('Failed to install ' + $AppName)",
+        "    exit 1",
+        "}",
+    };
+
+            return string.Join(Environment.NewLine, lines);
+        }
+
         private static string GetInstallScriptContent() => @"
 param(
     [Parameter(Mandatory=$true)]

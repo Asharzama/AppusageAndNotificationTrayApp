@@ -1,17 +1,17 @@
-{
-  "profiles": {
-    "AppUsageAndNotification (Package)": {
-      "commandName": "MsixPackage"
-    },
-    "AppUsageAndNotification (Unpackaged)": {
-      "commandName": "Project"
-    }
-  }
-}
 //{
 //  "profiles": {
-//    "AppUsageAndNotification": {
+//    "AppUsageAndNotification (Package)": {
+//      "commandName": "MsixPackage"
+//    },
+//    "AppUsageAndNotification (Unpackaged)": {
 //      "commandName": "Project"
 //    }
 //  }
+//}
+{
+  "profiles": {
+    "AppUsageAndNotification": {
+      "commandName": "Project"
+    }
+  }
 }
