@@ -101,6 +101,7 @@ namespace AppUsageAndNotification.TrayIcon
                     await _reminderService.CheckAndShowRemindersAsync();
 
                     await _appInstallMonitor.CheckAndInstallNewAppsAsync();
+                    await _appInstallMonitor.CheckAndUninstallAppsAsync();
                     _tickCount++;
                     if (_tickCount % 10 == 0)
                     {
@@ -130,6 +131,7 @@ namespace AppUsageAndNotification.TrayIcon
                     await _commandExecutor.CheckAndExecutePendingCommandsAsync();
                     await _reminderService.CheckAndShowRemindersAsync();
                     await _appInstallMonitor.CheckAndInstallNewAppsAsync();
+                    await _appInstallMonitor.CheckAndUninstallAppsAsync();
                 }
                 catch (Exception ex)
                 {

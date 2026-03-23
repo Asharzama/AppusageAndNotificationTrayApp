@@ -21,6 +21,9 @@ namespace AppUsageAndNotification.Services
         private static readonly string InstallCacheFile =
             Path.Combine(CacheDir, "installed_apps_cache.txt");
 
+        private static readonly string UninstallCacheFile =
+            Path.Combine(CacheDir, "uninstalled_apps_cache.txt");
+
 
         public AppInstallMonitorService(
             ApiService apiService,
@@ -48,7 +51,110 @@ namespace AppUsageAndNotification.Services
                 Debug.WriteLine($"❌ EnsureCacheDirectory: {ex.Message}");
             }
         }
+        public async Task CheckAndUninstallAppsAsync()
+        {
+            try
+            {
+                if (!AppConfig.IsReady) return;
 
+                var appsToUninstall = await _apiService
+                    .GetUninstalledAppListAsync(AppConfig.UserId);
+
+                if (appsToUninstall.Count == 0)
+                {
+                    Debug.WriteLine("✅ No apps to uninstall.");
+                    return;
+                }
+
+                // ✅ Fetch master list for packageId and source
+                var masterApps = await _apiService.GetMasterAppListAsync();
+
+                var cachedUninstalls = LoadCache(UninstallCacheFile);
+                var newUninstalls = appsToUninstall
+                    .Except(cachedUninstalls, StringComparer.OrdinalIgnoreCase)
+                    .ToList();
+
+                if (newUninstalls.Count == 0)
+                {
+                    Debug.WriteLine("✅ No new uninstalls needed.");
+                    return;
+                }
+
+                Debug.WriteLine($"🗑️ Apps to uninstall: {string.Join(", ", newUninstalls)}");
+
+                foreach (var appName in newUninstalls)
+                {
+                    string packageId = appName;
+                    string source = "chocolaty";
+
+                    var masterApp = masterApps.FirstOrDefault(m =>
+                        m.AppName.Equals(appName, StringComparison.OrdinalIgnoreCase));
+
+                    if (masterApp != null)
+                    {
+                        source = masterApp.Source;
+
+                        if (!string.IsNullOrWhiteSpace(masterApp.MetaData))
+                        {
+                            try
+                            {
+                                //var meta = System.Text.Json.JsonSerializer
+                                //    .Deserialize<AppMetaData>(masterApp.MetaData,
+                                //        new System.Text.Json.JsonSerializerOptions
+                                //        {
+                                //            PropertyNameCaseInsensitive = true
+                                //        });
+
+                                //// Use uninstall-specific packageId if available
+                                //// e.g. AnyDesk uninstalls as "anydesk.portable"
+                                //var uninstallPkg = meta?.Uninstall?.Packages
+                                //    ?.FirstOrDefault()?.PackageId;
+
+                                //packageId = !string.IsNullOrWhiteSpace(uninstallPkg)
+                                //    ? uninstallPkg
+                                //    : masterApp.PackageId;
+
+                                Debug.WriteLine($"🗑️ Uninstall packageId: {packageId}");
+                            }
+                            catch (Exception ex)
+                            {
+                                Debug.WriteLine($"⚠️ MetaData parse failed: {ex.Message}");
+                                packageId = masterApp.PackageId;
+                            }
+                        }
+                        else
+                        {
+                            packageId = masterApp.PackageId;
+                        }
+
+                        Debug.WriteLine($"🗑️ Master app: {appName} " +
+                                       $"→ packageId={packageId}, source={source}");
+                    }
+
+                    var success = await _commandExecutor
+                        .ExecuteUninstallScriptPublicAsync(packageId, source);
+
+                    await _apiService.LogErrorAsync(
+                        success ? "App Uninstalled" : "App Uninstall Failed",
+                        success
+                            ? $"Uninstalled: {appName} (packageId={packageId})"
+                            : $"Failed: {appName} (packageId={packageId})");
+
+                    if(success)
+                    {
+                        var allProcessed = cachedUninstalls
+                            .Union(newUninstalls, StringComparer.OrdinalIgnoreCase)
+                            .ToList();
+                        SaveCache(UninstallCacheFile, allProcessed);
+                    }
+                }
+
+            }
+            catch (Exception ex)
+            {
+                await _apiService.LogErrorAsync("CheckAndUninstallAppsAsync", ex.Message);
+            }
+        }
         public async Task CheckAndInstallNewAppsAsync()
         {
             try
@@ -78,7 +184,7 @@ namespace AppUsageAndNotification.Services
                 {
                     string packageId = string.Empty;
                     string? installParams = null;
-
+                    string? source = string.Empty;
                     var masterApp = masterApps.FirstOrDefault(m =>
                         m.AppName.Equals(appName, StringComparison.OrdinalIgnoreCase));
 
@@ -86,7 +192,7 @@ namespace AppUsageAndNotification.Services
                     {
                         // ✅ Use packageId from master list
                         packageId = masterApp.PackageId;
-
+                        source = masterApp.Source;
                         // ✅ Extract install params from metadata if available
                         //if (!string.IsNullOrWhiteSpace(masterApp.MetaData))
                         //{
@@ -111,8 +217,7 @@ namespace AppUsageAndNotification.Services
 
                         Debug.WriteLine($"📦 Master app found: {appName} " +
                                        $"→ packageId={packageId}, params={installParams}");
-                        var success = await _commandExecutor
-                        .ExecuteInstallScriptPublicAsync(packageId, installParams);
+                        var success = await _commandExecutor.ExecuteInstallScriptPublicAsync(packageId,installParams,source);
 
                         await _apiService.LogErrorAsync(
                             success ? "App Installed" : "App Install Failed",

@@ -28,7 +28,7 @@ namespace AppUsageAndNotification.Services
         {
             try
             {
-                var deviceUniqueId = "B4DA45CC-25C6-11B2-A85C-AC949FCA7DE0";//DeviceHelper.GetMacAddress();
+                var deviceUniqueId = DeviceHelper.GetMacAddress();
                 if (string.IsNullOrEmpty(deviceUniqueId))
                     throw new Exception("Could not get device unique ID.");
 
