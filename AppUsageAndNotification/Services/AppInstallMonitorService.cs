@@ -13,17 +13,14 @@ namespace AppUsageAndNotification.Services
         private readonly ApiService _apiService;
         private readonly CommandExecutorService _commandExecutor;
 
-        // ✅ Store in user's AppData\Local\Safe4Sure — always accessible
-        private static readonly string CacheDir = Path.Combine(
-            Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData),
-            "Safe4Sure");
+        private static readonly string CacheDir = @"C:\TrayLogs";
+        private static readonly string CacheFile = Path.Combine(CacheDir, "apps_cache.json");
 
-        private static readonly string InstallCacheFile =
-            Path.Combine(CacheDir, "installed_apps_cache.txt");
+        //private static readonly string InstallCacheFile =
+        //    Path.Combine(CacheDir, "installed_apps_cache.txt");
 
-        private static readonly string UninstallCacheFile =
-            Path.Combine(CacheDir, "uninstalled_apps_cache.txt");
-
+        //private static readonly string UninstallCacheFile =
+        //    Path.Combine(CacheDir, "uninstalled_apps_cache.txt");
 
         public AppInstallMonitorService(
             ApiService apiService,
@@ -32,7 +29,6 @@ namespace AppUsageAndNotification.Services
             _apiService = apiService;
             _commandExecutor = commandExecutor;
 
-            // ✅ Ensure cache directory exists on startup
             EnsureCacheDirectory();
         }
 
@@ -62,74 +58,29 @@ namespace AppUsageAndNotification.Services
 
                 if (appsToUninstall.Count == 0)
                 {
-                    Debug.WriteLine("✅ No apps to uninstall.");
+                    Debug.WriteLine("📋 No apps in uninstall list.");
                     return;
                 }
 
-                // ✅ Fetch master list for packageId and source
-                var masterApps = await _apiService.GetMasterAppListAsync();
+                var cache = LoadCache();
 
-                var cachedUninstalls = LoadCache(UninstallCacheFile);
-                var newUninstalls = appsToUninstall
-                    .Except(cachedUninstalls, StringComparer.OrdinalIgnoreCase)
+                var pendingApps = appsToUninstall
+                    .Where(a => !cache.TryGetValue(a.AppName, out var status) ||
+                                status != "uninstalled")
                     .ToList();
 
-                if (newUninstalls.Count == 0)
+                if (pendingApps.Count == 0)
                 {
-                    Debug.WriteLine("✅ No new uninstalls needed.");
+                    Debug.WriteLine("✅ No new apps to uninstall.");
                     return;
                 }
 
-                Debug.WriteLine($"🗑️ Apps to uninstall: {string.Join(", ", newUninstalls)}");
+                Debug.WriteLine($"🗑️ Apps to uninstall: {string.Join(", ", pendingApps.Select(a => a.AppName))}");
 
-                foreach (var appName in newUninstalls)
+                foreach (var app in pendingApps)
                 {
-                    string packageId = appName;
-                    string source = "chocolaty";
-
-                    var masterApp = masterApps.FirstOrDefault(m =>
-                        m.AppName.Equals(appName, StringComparison.OrdinalIgnoreCase));
-
-                    if (masterApp != null)
-                    {
-                        source = masterApp.Source;
-
-                        if (!string.IsNullOrWhiteSpace(masterApp.MetaData))
-                        {
-                            try
-                            {
-                                //var meta = System.Text.Json.JsonSerializer
-                                //    .Deserialize<AppMetaData>(masterApp.MetaData,
-                                //        new System.Text.Json.JsonSerializerOptions
-                                //        {
-                                //            PropertyNameCaseInsensitive = true
-                                //        });
-
-                                //// Use uninstall-specific packageId if available
-                                //// e.g. AnyDesk uninstalls as "anydesk.portable"
-                                //var uninstallPkg = meta?.Uninstall?.Packages
-                                //    ?.FirstOrDefault()?.PackageId;
-
-                                //packageId = !string.IsNullOrWhiteSpace(uninstallPkg)
-                                //    ? uninstallPkg
-                                //    : masterApp.PackageId;
-
-                                Debug.WriteLine($"🗑️ Uninstall packageId: {packageId}");
-                            }
-                            catch (Exception ex)
-                            {
-                                Debug.WriteLine($"⚠️ MetaData parse failed: {ex.Message}");
-                                packageId = masterApp.PackageId;
-                            }
-                        }
-                        else
-                        {
-                            packageId = masterApp.PackageId;
-                        }
-
-                        Debug.WriteLine($"🗑️ Master app: {appName} " +
-                                       $"→ packageId={packageId}, source={source}");
-                    }
+                    string packageId = app.MasterDetails.PackageId;
+                    string source = app.MasterDetails.Source;
 
                     var success = await _commandExecutor
                         .ExecuteUninstallScriptPublicAsync(packageId, source);
@@ -137,38 +88,43 @@ namespace AppUsageAndNotification.Services
                     await _apiService.LogErrorAsync(
                         success ? "App Uninstalled" : "App Uninstall Failed",
                         success
-                            ? $"Uninstalled: {appName} (packageId={packageId})"
-                            : $"Failed: {appName} (packageId={packageId})");
+                            ? $"Uninstalled: {app.AppName} ({packageId})"
+                            : $"Failed: {app.AppName} ({packageId})");
 
-                    if(success)
+                    if (success)
                     {
-                        var allProcessed = cachedUninstalls
-                            .Union(newUninstalls, StringComparer.OrdinalIgnoreCase)
-                            .ToList();
-                        SaveCache(UninstallCacheFile, allProcessed);
+                        cache[app.AppName] = "uninstalled";
+                        SaveCache(cache);
+                        Debug.WriteLine($"💾 {app.AppName} → uninstalled");
                     }
                 }
-
             }
             catch (Exception ex)
             {
                 await _apiService.LogErrorAsync("CheckAndUninstallAppsAsync", ex.Message);
             }
         }
+
         public async Task CheckAndInstallNewAppsAsync()
         {
             try
             {
                 if (!AppConfig.IsReady) return;
 
-                var latestApps = await _apiService
+                var appsToInstall = await _apiService
                     .GetInstalledAppListAsync(AppConfig.UserId);
-                var masterApps = await _apiService.GetMasterAppListAsync();
-                if (latestApps.Count == 0) return;
 
-                var cachedApps = LoadCache(InstallCacheFile);
-                var newApps = latestApps
-                    .Except(cachedApps, StringComparer.OrdinalIgnoreCase)
+                if (appsToInstall.Count == 0)
+                {
+                    Debug.WriteLine("📋 No apps in install list.");
+                    return;
+                }
+
+                var cache = LoadCache();
+
+                var newApps = appsToInstall
+                    .Where(a => !cache.TryGetValue(a.AppName, out var status) ||
+                                status != "installed")
                     .ToList();
 
                 if (newApps.Count == 0)
@@ -177,98 +133,73 @@ namespace AppUsageAndNotification.Services
                     return;
                 }
 
-                Debug.WriteLine($"🆕 New apps: {string.Join(", ", newApps)}");
+                Debug.WriteLine($"🆕 New apps: {string.Join(", ", newApps.Select(a => a.AppName))}");
 
-
-                foreach (var appName in newApps)
+                foreach (var app in newApps)
                 {
-                    string packageId = string.Empty;
-                    string? installParams = null;
-                    string? source = string.Empty;
-                    var masterApp = masterApps.FirstOrDefault(m =>
-                        m.AppName.Equals(appName, StringComparison.OrdinalIgnoreCase));
+                    string packageId = app.MasterDetails.PackageId;
+                    string source = app.MasterDetails.Source;
 
-                    if (masterApp != null)
+                    var success = await _commandExecutor
+                        .ExecuteInstallScriptPublicAsync(packageId, null, source);
+
+                    await _apiService.LogErrorAsync(
+                        success ? "App Installed" : "App Install Failed",
+                        success
+                            ? $"Installed: {app.AppName} ({packageId})"
+                            : $"Failed: {app.AppName} ({packageId})");
+
+                    if (success)
                     {
-                        // ✅ Use packageId from master list
-                        packageId = masterApp.PackageId;
-                        source = masterApp.Source;
-                        // ✅ Extract install params from metadata if available
-                        //if (!string.IsNullOrWhiteSpace(masterApp.MetaData))
-                        //{
-                        //    try
-                        //    {
-                        //        var meta = System.Text.Json.JsonSerializer
-                        //            .Deserialize<AppMetaData>(masterApp.MetaData,
-                        //                new System.Text.Json.JsonSerializerOptions
-                        //                {
-                        //                    PropertyNameCaseInsensitive = true
-                        //                });
-
-                        //        installParams = meta?.Install?.Params;
-
-                        //        Debug.WriteLine($"📋 MetaData params: {installParams}");
-                        //    }
-                        //    catch (Exception ex)
-                        //    {
-                        //        Debug.WriteLine($"⚠️ MetaData parse failed: {ex.Message}");
-                        //    }
-                        //}
-
-                        Debug.WriteLine($"📦 Master app found: {appName} " +
-                                       $"→ packageId={packageId}, params={installParams}");
-                        var success = await _commandExecutor.ExecuteInstallScriptPublicAsync(packageId,installParams,source);
-
-                        await _apiService.LogErrorAsync(
-                            success ? "App Installed" : "App Install Failed",
-                            success
-                                ? $"Installed: {appName} (packageId={packageId})"
-                                : $"Failed: {appName} (packageId={packageId})");
-
-                        if(success) SaveCache(InstallCacheFile, latestApps);
+                        cache[app.AppName] = "installed";
+                        SaveCache(cache);
+                        Debug.WriteLine($"💾 {app.AppName} → installed");
                     }
-                    else
-                    {
-                        Debug.WriteLine($"📦 No master app found for: {appName} " +
-                                       $"— using appName as packageId");
-                    }
-
-                    
                 }
-
             }
             catch (Exception ex)
             {
-                await _apiService.LogErrorAsync(
-                    "CheckAndInstallNewAppsAsync", ex.Message);
+                await _apiService.LogErrorAsync("CheckAndInstallNewAppsAsync", ex.Message);
             }
         }
 
 
-        private static List<string> LoadCache(string filePath)
+        private static Dictionary<string, string> LoadCache()
         {
             try
             {
-                if (!File.Exists(filePath)) return new List<string>();
-                return File.ReadAllLines(filePath)
-                    .Where(l => !string.IsNullOrWhiteSpace(l))
-                    .Select(l => l.Trim())
-                    .ToList();
+                if (!File.Exists(CacheFile))
+                    return new Dictionary<string, string>(
+                        StringComparer.OrdinalIgnoreCase);
+
+                var json = File.ReadAllText(CacheFile);
+                return System.Text.Json.JsonSerializer
+                    .Deserialize<Dictionary<string, string>>(json,
+                        new System.Text.Json.JsonSerializerOptions
+                        {
+                            PropertyNameCaseInsensitive = true
+                        })
+                    ?? new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
             }
             catch (Exception ex)
             {
                 Debug.WriteLine($"❌ LoadCache: {ex.Message}");
-                return new List<string>();
+                return new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
             }
         }
 
-        private static void SaveCache(string filePath, List<string> items)
+        private static void SaveCache(Dictionary<string, string> cache)
         {
             try
             {
                 EnsureCacheDirectory();
-                File.WriteAllLines(filePath, items);
-                Debug.WriteLine($"💾 Cache saved: {filePath}");
+                var json = System.Text.Json.JsonSerializer.Serialize(cache,
+                    new System.Text.Json.JsonSerializerOptions
+                    {
+                        WriteIndented = true
+                    });
+                File.WriteAllText(CacheFile, json);
+                Debug.WriteLine($"💾 Cache saved: {CacheFile}");
             }
             catch (Exception ex)
             {

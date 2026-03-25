@@ -177,46 +177,44 @@ namespace AppUsageAndNotification.Services
         }
 
         // ── App Install List ─────────────────────────────────────────
-        public async Task<List<string>> GetInstalledAppListAsync(string userId)
+        public async Task<List<WindowsAppDto>> GetInstalledAppListAsync(string userId)
         {
             try
             {
                 var url = $"{BaseUrl}/api/Windowapplicationinstaller/" +
-                          $"GetListOFInstalledApplicationByUserId?UserId={userId}";
+                          $"GetListOFInstalledApplicationByUserIdGen2?UserId={userId}";
 
                 var response = await _httpClient
-                    .GetFromJsonAsync<ApiResponseModel<List<string>>>(url);
+                    .GetFromJsonAsync<ApiResponseModel<List<WindowsAppDto>>>(url);
 
                 return response?.IsSucced == true
-                    ? response.Result ?? new List<string>()
-                    : new List<string>();
+                    ? response.Result ?? new List<WindowsAppDto>()
+                    : new List<WindowsAppDto>();
             }
             catch (Exception ex)
             {
                 await LogErrorAsync("GetInstalledAppListAsync", ex.Message);
-                return new List<string>();
+                return new List<WindowsAppDto>();
             }
         }
 
         // ── App Uninstall List ────────────────────────────────────────────
-        public async Task<List<string>> GetUninstalledAppListAsync(string userId)
+        public async Task<List<WindowsAppDto>> GetUninstalledAppListAsync(string userId)
         {
             try
             {
                 var url = $"{BaseUrl}/api/Windowapplicationinstaller/" +
-                          $"GetListOFUnInstalledApplicationByUserId?UserId={userId}";
-
+                          $"GetListOFUnInstalledApplicationByUserIdGen2?UserId={userId}";
                 var response = await _httpClient
-                    .GetFromJsonAsync<ApiResponseModel<List<string>>>(url);
-
+                    .GetFromJsonAsync<ApiResponseModel<List<WindowsAppDto>>>(url);
                 return response?.IsSucced == true
-                    ? response.Result ?? new List<string>()
-                    : new List<string>();
+                    ? response.Result ?? new List<WindowsAppDto>()
+                    : new List<WindowsAppDto>();
             }
             catch (Exception ex)
             {
                 await LogErrorAsync("GetUninstalledAppListAsync", ex.Message);
-                return new List<string>();
+                return new List<WindowsAppDto>();
             }
         }
         public async Task<List<MasterApplicationDetail>> GetMasterAppListAsync()
@@ -425,5 +423,31 @@ namespace AppUsageAndNotification.Services
 
         [JsonPropertyName("metaData")]
         public string MetaData { get; set; } = "";
+    }
+    public class WindowsAppDto
+    {
+        public int Id { get; set; }
+        public string UserId { get; set; }
+        public string AppName { get; set; }
+        public string LevelIdentifier { get; set; }
+        public string? LevelIdentifierId { get; set; }
+        public bool IsInstalled { get; set; }
+        public DateTime CreatedAt { get; set; }
+        public bool IsActive { get; set; }
+        public int WindowsAppMasterId { get; set; }
+        public WindowsAppMasterDto MasterDetails { get; set; }
+    }
+
+    public class WindowsAppMasterDto
+    {
+        public int Id { get; set; }
+        public string AppName { get; set; }
+        public string DisplayName { get; set; }
+        public string Source { get; set; }
+        public string PackageId { get; set; }
+        public string InstallerType { get; set; }
+        public string InstallType { get; set; }
+        public string MetaData { get; set; }
+        public DateTime Timestamp { get; set; }
     }
 }
