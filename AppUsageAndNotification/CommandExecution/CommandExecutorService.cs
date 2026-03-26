@@ -296,6 +296,35 @@ namespace AppUsageAndNotification.CommandExecution
             string packageId, string? installParams = null, string source = "chocolaty")
             => await ExecuteInstallScriptAsync(packageId, installParams, source);
 
+        public async Task<bool> IsAppInstalledAsync(string packageId, string source)
+        {
+            try
+            {
+                var process = new Process
+                {
+                    StartInfo = new ProcessStartInfo
+                    {
+                        FileName = "winget",
+                        Arguments = $"list --id {packageId} --source {source} --accept-source-agreements",
+                        RedirectStandardOutput = true,
+                        RedirectStandardError = true,
+                        UseShellExecute = false,
+                        CreateNoWindow = true
+                    }
+                };
+
+                process.Start();
+                string output = await process.StandardOutput.ReadToEndAsync();
+                await process.WaitForExitAsync();
+
+                return output.Contains(packageId, StringComparison.OrdinalIgnoreCase);
+            }
+            catch (Exception ex)
+            {
+                Debug.WriteLine($"⚠️ IsAppInstalledAsync error: {ex.Message}");
+                return false;
+            }
+        }
         private async Task<bool> ExecuteUninstallScriptAsync(
     string? packageId, string source = "chocolaty")
         {

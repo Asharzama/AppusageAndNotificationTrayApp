@@ -430,7 +430,7 @@ namespace AppUsageAndNotification.Services
         public string UserId { get; set; }
         public string AppName { get; set; }
         public string LevelIdentifier { get; set; }
-        public string? LevelIdentifierId { get; set; }
+        public int? LevelIdentifierId { get; set; }
         public bool IsInstalled { get; set; }
         public DateTime CreatedAt { get; set; }
         public bool IsActive { get; set; }

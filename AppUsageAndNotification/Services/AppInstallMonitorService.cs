@@ -81,6 +81,19 @@ namespace AppUsageAndNotification.Services
                 {
                     string packageId = app.MasterDetails.PackageId;
                     string source = app.MasterDetails.Source;
+                    bool alreadyAbsent = !await _commandExecutor.IsAppInstalledAsync(packageId, source);
+
+                    if (alreadyAbsent)
+                    {
+                        Debug.WriteLine($"ℹ️ {app.AppName} not found on machine, marking as uninstalled in cache.");
+                        cache[app.AppName] = "uninstalled";
+                        SaveCache(cache);
+
+                        await _apiService.LogErrorAsync("App Already Absent",
+                            $"Not present on machine, cached as uninstalled: {app.AppName} ({packageId})");
+
+                        continue;
+                    }
 
                     var success = await _commandExecutor
                         .ExecuteUninstallScriptPublicAsync(packageId, source);
@@ -142,6 +155,24 @@ namespace AppUsageAndNotification.Services
 
                     var success = await _commandExecutor
                         .ExecuteInstallScriptPublicAsync(packageId, null, source);
+
+                    if (!success)
+                    {
+                        bool alreadyInstalled = await _commandExecutor
+                            .IsAppInstalledAsync(packageId, source);
+
+                        if (alreadyInstalled)
+                        {
+                            Debug.WriteLine($"ℹ️ {app.AppName} already installed, marking in cache.");
+                            cache[app.AppName] = "installed";
+                            SaveCache(cache);
+
+                            await _apiService.LogErrorAsync("App Already Installed",
+                                $"Already present, cached: {app.AppName} ({packageId})");
+
+                            continue;
+                        }
+                    }
 
                     await _apiService.LogErrorAsync(
                         success ? "App Installed" : "App Install Failed",
