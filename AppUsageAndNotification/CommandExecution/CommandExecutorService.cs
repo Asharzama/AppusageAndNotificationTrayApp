@@ -305,7 +305,7 @@ namespace AppUsageAndNotification.CommandExecution
                     StartInfo = new ProcessStartInfo
                     {
                         FileName = "winget",
-                        Arguments = $"list --id {packageId} --source {source} --accept-source-agreements",
+                        Arguments = $"list --id {packageId} --exact --accept-source-agreements",
                         RedirectStandardOutput = true,
                         RedirectStandardError = true,
                         UseShellExecute = false,
@@ -317,7 +317,11 @@ namespace AppUsageAndNotification.CommandExecution
                 string output = await process.StandardOutput.ReadToEndAsync();
                 await process.WaitForExitAsync();
 
-                return output.Contains(packageId, StringComparison.OrdinalIgnoreCase);
+                Debug.WriteLine($"🔍 winget list [{packageId}] exit: {process.ExitCode}");
+                Debug.WriteLine($"🔍 winget list [{packageId}] output: {output}");
+
+                // Exit code 0 = found, non-zero = not found
+                return process.ExitCode == 0;
             }
             catch (Exception ex)
             {
